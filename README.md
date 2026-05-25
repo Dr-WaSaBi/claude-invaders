@@ -4,6 +4,8 @@ A Space Invaders-style game where you — a lone human — stand against a desce
 
 ![Python](https://img.shields.io/badge/python-3.8%2B-blue) ![pygame](https://img.shields.io/badge/pygame-2.x-orange)
 
+![Claude Invaders](Claude-Invaders.png)
+
 ## Story
 
 The Claudes are coming. Row after row of orange, block-faced AIs march across the sky, dropping **matrix-rain bombs** that eat through the buildings you're hiding behind. Peek out, return fire, and thin the horde before they reach the ground — or you.
