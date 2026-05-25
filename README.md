@@ -64,3 +64,15 @@ No external assets — all graphics and audio are generated procedurally at runt
 | Kill front-row Claude | 10 |
 | Kill back-row Claude | up to 50 |
 | Level clear bonus | lives × 500 |
+
+## High Scores
+
+Scores persist between sessions in `highscores.json` (saved alongside the game).
+
+- **Top 5** are shown on the title screen
+- **Full top 10** are shown on the game-over screen
+- After a qualifying run, an arcade-style initials entry screen appears:
+  - `↑ ↓` to cycle letters A–Z, or just type them directly
+  - `→` or `Space` to advance to the next letter
+  - `Enter` to confirm
+  - Your rank is shown live as you type
