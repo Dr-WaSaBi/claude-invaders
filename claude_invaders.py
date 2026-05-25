@@ -1,5 +1,52 @@
 #!/usr/bin/env python3
-"""Claude Invaders — protect humanity from the descending Claude horde."""
+"""
+Claude Invaders — a pygame Space Invaders clone with Claude-themed aliens.
+
+HOW TO RUN
+----------
+    python3 claude_invaders.py
+
+DEPENDENCIES
+------------
+    pip install pygame numpy
+
+CONTROLS
+--------
+    ← → / A D   Move player left and right
+    SPACE        Fire a bullet
+    ESC          Quit the game
+
+ARCHITECTURE
+------------
+The game is organized into the following layers:
+
+  Sound:
+    SoundEngine   — synthesizes all sound effects from numpy waveforms at runtime;
+                    no audio files are needed.
+
+  Data:
+    HighScores    — loads, saves, and queries the top-10 score table
+                    persisted in highscores.json next to this file.
+
+  Sprites / Game Objects:
+    Building      — destructible bunker made of an 11×6 block grid
+    MatrixBomb    — alien projectile rendered as a falling matrix character trail
+    Bullet        — player projectile that travels upward
+    Particle      — short-lived explosion fragment
+    Player        — the human defender at the bottom of the screen
+    ClaudeAlien   — a single animated Claude-logo alien
+    Formation     — the 11×4 grid of ClaudeAliens that march and drop bombs
+
+  Screen Functions (each owns its own event/draw loop):
+    title_screen()          — main menu with animated alien and instructions
+    play_level()            — the core gameplay loop; returns (score, lives, hi, result)
+    game_over_screen()      — end-of-game summary with high scores table
+    enter_initials_screen() — arcade-style 3-letter initial entry for new high scores
+
+  Entry Point:
+    main()  — sequences title → level progression → game over → initials → repeat
+              Levels 1–6 increase alien speed; clearing all 6 triggers a win screen.
+"""
 
 import pygame
 import random
@@ -54,6 +101,7 @@ class SoundEngine:
     SR = 44100
 
     def __init__(self):
+        """Pre-synthesize all game sounds and store them as pygame Sound objects."""
         self._march_sounds = [self._tone(f, 0.09, 'square', 0.22)
                               for f in (160, 130, 110, 85)]
         self._march_idx = 0
@@ -65,14 +113,42 @@ class SoundEngine:
 
     # ── synthesis helpers ──────────────────────────────────────────────────────
     def _t(self, duration):
+        """Build a time array for audio synthesis.
+
+        Args:
+            duration: Length of the audio clip in seconds.
+
+        Returns:
+            numpy array of evenly spaced time values from 0 to duration.
+        """
         return np.linspace(0, duration, int(self.SR * duration), endpoint=False)
 
     def _bake(self, arr, vol=0.3):
+        """Convert a float32 numpy waveform into a stereo pygame Sound.
+
+        Args:
+            arr: 1-D numpy array of audio samples in the range [-1, 1].
+            vol: Volume scalar applied before clipping (default 0.3).
+
+        Returns:
+            pygame.Sound object ready to call .play() on.
+        """
         arr = np.clip(arr * vol, -1.0, 1.0)
         s16 = (arr * 32767).astype(np.int16)
         return pygame.sndarray.make_sound(np.ascontiguousarray(np.column_stack([s16, s16])))
 
     def _tone(self, freq, dur, wave='square', vol=0.3):
+        """Synthesize a single pure tone with an exponential fade-out.
+
+        Args:
+            freq: Frequency in Hz.
+            dur: Duration in seconds.
+            wave: Waveform type — 'square' or 'sine' (default 'square').
+            vol: Volume scalar (default 0.3).
+
+        Returns:
+            pygame.Sound of the synthesized tone.
+        """
         t = self._t(dur)
         s = np.sign(np.sin(2 * np.pi * freq * t)) if wave == 'square' \
             else np.sin(2 * np.pi * freq * t)
@@ -81,6 +157,18 @@ class SoundEngine:
         return self._bake(s, vol)
 
     def _sweep(self, f0, f1, dur, wave='square', vol=0.2):
+        """Synthesize a frequency sweep (glide) from f0 to f1.
+
+        Args:
+            f0: Starting frequency in Hz.
+            f1: Ending frequency in Hz.
+            dur: Duration in seconds.
+            wave: Waveform type — 'square' or 'sine' (default 'square').
+            vol: Volume scalar (default 0.2).
+
+        Returns:
+            pygame.Sound of the synthesized sweep.
+        """
         t = self._t(dur)
         phase = np.cumsum(np.linspace(f0, f1, len(t)) / self.SR * 2 * np.pi)
         s = np.sign(np.sin(phase)) if wave == 'square' else np.sin(phase)
@@ -89,6 +177,11 @@ class SoundEngine:
         return self._bake(s, vol)
 
     def _kill_sound(self):
+        """Synthesize the alien-kill explosion sound (noise + descending tone).
+
+        Returns:
+            pygame.Sound of a short percussive blast.
+        """
         t = self._t(0.28)
         noise = np.random.default_rng(0).uniform(-1, 1, len(t))
         env   = np.exp(-t * 18)
@@ -97,6 +190,11 @@ class SoundEngine:
         return self._bake((noise * 0.5 + tone * 0.5) * env, 0.38)
 
     def _player_hit_sound(self):
+        """Synthesize the player-hit damage sound (longer decay noise + tone mix).
+
+        Returns:
+            pygame.Sound of a sustained hit effect.
+        """
         t = self._t(0.75)
         noise = np.random.default_rng(1).uniform(-1, 1, len(t))
         env   = np.exp(-t * 5.5)
@@ -105,6 +203,11 @@ class SoundEngine:
         return self._bake((noise * 0.4 + tone * 0.6) * env, 0.52)
 
     def _fanfare_sound(self):
+        """Synthesize a 4-note ascending victory fanfare (C-E-G-C).
+
+        Returns:
+            pygame.Sound of the concatenated fanfare sequence.
+        """
         notes, dur = [262, 330, 392, 523], 0.11
         parts = []
         for freq in notes:
@@ -117,10 +220,16 @@ class SoundEngine:
 
     # ── play helpers ───────────────────────────────────────────────────────────
     def march(self):
+        """Play the next step in the 4-beat alien march sequence."""
         self._march_sounds[self._march_idx % 4].play()
         self._march_idx += 1
 
     def play(self, name: str):
+        """Play a named sound attribute by attribute name.
+
+        Args:
+            name: Name of a Sound attribute on this instance (e.g. 'shoot', 'kill').
+        """
         getattr(self, name).play()
 
 
@@ -132,10 +241,12 @@ class HighScores:
     FILE = Path(__file__).parent / "highscores.json"
 
     def __init__(self):
+        """Initialize and load the high scores from disk."""
         self.scores: list[dict] = []
         self._load()
 
     def _load(self):
+        """Load scores from highscores.json, sorting descending; silently resets on error."""
         try:
             data = json.loads(self.FILE.read_text())
             self.scores = sorted(data, key=lambda x: x["score"], reverse=True)[:self.MAX]
@@ -143,9 +254,19 @@ class HighScores:
             self.scores = []
 
     def _save(self):
+        """Persist the current scores list to highscores.json."""
         self.FILE.write_text(json.dumps(self.scores, indent=2))
 
     def is_qualifying(self, score: int) -> bool:
+        """Check whether a score would make the top-10 leaderboard.
+
+        Args:
+            score: The score to test.
+
+        Returns:
+            True if the score is > 0 and would displace the lowest entry (or the
+            table has fewer than MAX entries).
+        """
         if score <= 0:
             return False
         if len(self.scores) < self.MAX:
@@ -153,18 +274,37 @@ class HighScores:
         return score > self.scores[-1]["score"]
 
     def rank(self, score: int) -> int:
+        """Return the 1-based leaderboard position a score would occupy.
+
+        Args:
+            score: The score to rank.
+
+        Returns:
+            1-based position (1 = highest). Returns len(scores)+1 if lower than all entries.
+        """
         for i, entry in enumerate(self.scores):
             if score >= entry["score"]:
                 return i + 1
         return len(self.scores) + 1
 
     def add(self, name: str, score: int):
+        """Add a new entry, re-sort, trim to MAX, and save to disk.
+
+        Args:
+            name: Player initials (up to 3 characters; padded/uppercased automatically).
+            score: The score to record.
+        """
         self.scores.append({"name": name.upper()[:3].ljust(3), "score": score})
         self.scores.sort(key=lambda x: x["score"], reverse=True)
         self.scores = self.scores[:self.MAX]
         self._save()
 
     def top_score(self) -> int:
+        """Return the highest recorded score, or 0 if the leaderboard is empty.
+
+        Returns:
+            Integer score of the #1 entry, or 0.
+        """
         return self.scores[0]["score"] if self.scores else 0
 
 
@@ -172,7 +312,17 @@ hs = HighScores()
 
 # ── sprite helpers ─────────────────────────────────────────────────────────────
 def make_claude_surf(size: int, frame: int = 0) -> pygame.Surface:
-    """Render a single Claude-logo-style alien to a surface."""
+    """Render an animated Claude-logo alien sprite to a new Surface.
+
+    Draws a rounded orange body, two eyes, a C-shaped mouth, and three animated legs.
+
+    Args:
+        size: Width (and approximate height) of the alien body in pixels.
+        frame: Animation frame index — 0 or 1 (controls leg positions).
+
+    Returns:
+        pygame.Surface (with alpha) containing the rendered alien.
+    """
     sw = size
     sh = size + size // 4          # a bit taller for legs
     surf = pygame.Surface((sw, sh), pygame.SRCALPHA)
@@ -211,7 +361,16 @@ def make_claude_surf(size: int, frame: int = 0) -> pygame.Surface:
 
 
 def make_human_surf(size: int = 28) -> pygame.Surface:
-    """Simple pixel-human sprite."""
+    """Render a pixel-art human player sprite to a new Surface.
+
+    Draws a head, hair, shirt body, arms, legs, and a small gun barrel.
+
+    Args:
+        size: Width of the sprite in pixels; height is twice this value (default 28).
+
+    Returns:
+        pygame.Surface (with alpha) containing the rendered human.
+    """
     surf = pygame.Surface((size, size * 2), pygame.SRCALPHA)
     s = size
     # head
@@ -239,6 +398,14 @@ BLD_H = 6          # blocks tall
 
 # shape mask (True = solid block), rounded bunker silhouette
 def bunker_mask():
+    """Create the default 11×6 boolean block mask for a bunker silhouette.
+
+    The mask has a 3-block doorway notch cut from the bottom centre and the
+    two top corners rounded off.
+
+    Returns:
+        List of BLD_H lists, each with BLD_W booleans (True = solid block).
+    """
     mask = [[True] * BLD_W for _ in range(BLD_H)]
     # carve notch at bottom centre (doorway)
     for r in range(BLD_H - 2, BLD_H):
@@ -254,11 +421,22 @@ def bunker_mask():
 # ── game objects ───────────────────────────────────────────────────────────────
 class Building:
     def __init__(self, cx: int, y: int):
+        """Initialize a Building centred at a given screen position.
+
+        Args:
+            cx: Horizontal centre of the building in screen pixels.
+            y: Top edge of the building in screen pixels.
+        """
         self.mask = bunker_mask()
         self.x = cx - BLD_W * BLOCK // 2
         self.y = y
 
     def draw(self, surf):
+        """Draw all surviving building blocks to the given surface.
+
+        Args:
+            surf: pygame.Surface to draw onto.
+        """
         for r, row in enumerate(self.mask):
             for c, alive in enumerate(row):
                 if not alive:
@@ -270,7 +448,19 @@ class Building:
                 pygame.draw.rect(surf, BLDG_HIT1, (rx, ry, BLOCK - 1, 2))
 
     def hit_test(self, bx, by, w=4, h=8):
-        """Return True if rect (bx,by,w,h) collides with any solid block; destroy hit blocks."""
+        """Test whether a rectangle overlaps any solid block and destroy those blocks.
+
+        Also randomly destroys one adjacent block per hit for chunky damage.
+
+        Args:
+            bx: Left edge of the test rectangle in screen pixels.
+            by: Top edge of the test rectangle in screen pixels.
+            w: Width of the test rectangle (default 4).
+            h: Height of the test rectangle (default 8).
+
+        Returns:
+            True if at least one block was hit and destroyed, False otherwise.
+        """
         hit = False
         for r in range(BLD_H):
             for c in range(BLD_W):
@@ -288,7 +478,15 @@ class Building:
         return hit
 
     def column_hit(self, cx, cy):
-        """Destroy blocks in a 2-block column at pixel x=cx from row containing cy down."""
+        """Destroy the first solid block in the column at screen x=cx at or below y=cy.
+
+        Args:
+            cx: Horizontal screen position to resolve to a block column.
+            cy: Vertical screen position; only blocks at or below this y are affected.
+
+        Returns:
+            True if a block was destroyed, False if no solid block was found.
+        """
         for c in range(BLD_W):
             if self.x + c * BLOCK <= cx < self.x + (c + 1) * BLOCK:
                 for r in range(BLD_H):
@@ -306,6 +504,12 @@ class MatrixBomb:
     TRAIL = 10        # number of chars in trail
 
     def __init__(self, x, y):
+        """Initialize a MatrixBomb at the given screen position.
+
+        Args:
+            x: Horizontal screen position in pixels.
+            y: Starting vertical screen position in pixels.
+        """
         self.x = x
         self.y = float(y)
         self.chars = [random.choice(MATRIX_CHARS) for _ in range(self.TRAIL)]
@@ -313,6 +517,11 @@ class MatrixBomb:
         self.dead = False
 
     def update(self, dt):
+        """Advance the bomb downward and randomly shuffle the character trail.
+
+        Args:
+            dt: Elapsed time in seconds since the last frame.
+        """
         self.y += self.SPEED * dt
         self.tick += dt
         if self.tick > 0.07:
@@ -320,6 +529,11 @@ class MatrixBomb:
             self.chars = [random.choice(MATRIX_CHARS)] + self.chars[:-1]
 
     def draw(self, surf):
+        """Draw the matrix character trail with a brightness gradient from tip to tail.
+
+        Args:
+            surf: pygame.Surface to draw onto.
+        """
         for i, ch in enumerate(self.chars):
             brightness = 1.0 - i / self.TRAIL
             if i == 0:
@@ -337,6 +551,11 @@ class MatrixBomb:
 
     @property
     def tip_rect(self):
+        """Collision rectangle for the leading (bottom) tip of the bomb trail.
+
+        Returns:
+            pygame.Rect centred on the current tip position, 8×8 pixels.
+        """
         return pygame.Rect(self.x - 4, int(self.y) - 4, 8, 8)
 
 
@@ -344,22 +563,45 @@ class Bullet:
     SPEED = 550
 
     def __init__(self, x, y):
+        """Initialize a player bullet at the given position.
+
+        Args:
+            x: Horizontal screen position in pixels.
+            y: Starting vertical screen position in pixels (top of the bullet).
+        """
         self.x = float(x)
         self.y = float(y)
         self.dead = False
 
     def update(self, dt):
+        """Move the bullet upward and mark it dead if it leaves the screen.
+
+        Args:
+            dt: Elapsed time in seconds since the last frame.
+        """
         self.y -= self.SPEED * dt
         if self.y < -10:
             self.dead = True
 
     def draw(self, surf):
+        """Draw the bullet as a yellow rectangle with a white highlight tip.
+
+        Args:
+            surf: pygame.Surface to draw onto.
+        """
         pygame.draw.rect(surf, BULLET_C, (int(self.x) - 2, int(self.y) - 8, 4, 12))
         pygame.draw.rect(surf, WHITE, (int(self.x) - 1, int(self.y) - 8, 2, 5))
 
 
 class Particle:
     def __init__(self, x, y, color):
+        """Initialize an explosion particle at the given position.
+
+        Args:
+            x: Horizontal spawn position in screen pixels.
+            y: Vertical spawn position in screen pixels.
+            color: RGB tuple for the particle's base colour.
+        """
         self.x = float(x)
         self.y = float(y)
         angle = random.uniform(0, math.tau)
@@ -372,12 +614,22 @@ class Particle:
         self.r = random.randint(2, 5)
 
     def update(self, dt):
+        """Advance the particle position under gravity and decrement its lifespan.
+
+        Args:
+            dt: Elapsed time in seconds since the last frame.
+        """
         self.x += self.vx * dt
         self.y += self.vy * dt
         self.vy += 200 * dt
         self.life -= dt
 
     def draw(self, surf):
+        """Draw a fading colour circle whose brightness scales with remaining life.
+
+        Args:
+            surf: pygame.Surface to draw onto.
+        """
         alpha = self.life / self.max_life
         r, g, b = self.color
         col = (int(r * alpha), int(g * alpha), int(b * alpha))
@@ -389,6 +641,7 @@ class Player:
     SHOT_COOLDOWN = 0.35
 
     def __init__(self):
+        """Initialize the player sprite at the centre-bottom of the screen with 3 lives."""
         self.surf = make_human_surf(28)
         self.w = self.surf.get_width()
         self.h = self.surf.get_height()
@@ -400,6 +653,12 @@ class Player:
         self.dead = False
 
     def update(self, dt, keys):
+        """Move the player based on held keys and tick down cooldowns.
+
+        Args:
+            dt: Elapsed time in seconds since the last frame.
+            keys: pygame key-state sequence returned by pygame.key.get_pressed().
+        """
         if keys[pygame.K_LEFT] or keys[pygame.K_a]:
             self.x = max(self.w // 2, self.x - self.SPEED * dt)
         if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
@@ -408,18 +667,33 @@ class Player:
         self.invincible = max(0.0, self.invincible - dt)
 
     def shoot(self):
+        """Fire a bullet if the shot cooldown has expired.
+
+        Returns:
+            A new Bullet positioned at the player's gun barrel, or None if still cooling down.
+        """
         if self.cooldown <= 0:
             self.cooldown = self.SHOT_COOLDOWN
             return Bullet(self.x, self.y - self.h // 2)
         return None
 
     def draw(self, surf):
+        """Draw the player sprite, flashing rapidly during the invincibility period.
+
+        Args:
+            surf: pygame.Surface to draw onto.
+        """
         if self.invincible > 0 and int(self.invincible * 10) % 2:
             return   # flash while invincible
         surf.blit(self.surf, (int(self.x) - self.w // 2, int(self.y) - self.h // 2))
 
     @property
     def rect(self):
+        """Axis-aligned collision rectangle centred on the player's position.
+
+        Returns:
+            pygame.Rect covering the player sprite.
+        """
         return pygame.Rect(int(self.x) - self.w // 2, int(self.y) - self.h // 2,
                            self.w, self.h)
 
@@ -428,6 +702,14 @@ class ClaudeAlien:
     SIZE = 36
 
     def __init__(self, col, row, x, y):
+        """Initialize a ClaudeAlien at a grid position and screen coordinate.
+
+        Args:
+            col: Column index within the formation (0–10).
+            row: Row index within the formation (0–3).
+            x: Initial horizontal screen position in pixels.
+            y: Initial vertical screen position in pixels.
+        """
         self.col = col
         self.row = row
         self.x = float(x)
@@ -438,12 +720,22 @@ class ClaudeAlien:
         self.surfs = [make_claude_surf(self.SIZE, f) for f in (0, 1)]
 
     def draw(self, surf):
+        """Draw the alien sprite at its current position if it is still alive.
+
+        Args:
+            surf: pygame.Surface to draw onto.
+        """
         if not self.alive:
             return
         s = self.surfs[self.frame]
         surf.blit(s, (int(self.x) - self.SIZE // 2, int(self.y) - self.SIZE // 2))
 
     def tick_anim(self, dt):
+        """Advance the leg animation timer and toggle the frame every 0.4 seconds.
+
+        Args:
+            dt: Elapsed time in seconds since the last frame.
+        """
         self.anim_tick += dt
         if self.anim_tick > 0.4:
             self.anim_tick = 0.0
@@ -451,6 +743,11 @@ class ClaudeAlien:
 
     @property
     def rect(self):
+        """Axis-aligned collision rectangle centred on the alien's position.
+
+        Returns:
+            pygame.Rect of SIZE × SIZE pixels.
+        """
         s = self.SIZE
         return pygame.Rect(int(self.x) - s // 2, int(self.y) - s // 2, s, s)
 
@@ -469,6 +766,7 @@ class Formation:
     DROP_INTERVAL = 0.6    # seconds between drops (scales with kills)
 
     def __init__(self):
+        """Initialize the alien formation with a full 11×4 grid and default movement state."""
         self.aliens: list[ClaudeAlien] = []
         self._build()
         self.dir = 1           # +1 right, -1 left
@@ -480,6 +778,7 @@ class Formation:
         self.stepped = False   # set True each time the formation moves
 
     def _build(self):
+        """Populate self.aliens with ROWS × COLS ClaudeAlien instances in a grid layout."""
         for row in range(ROWS):
             for col in range(COLS):
                 x = START_X + col * HGAP
@@ -488,9 +787,22 @@ class Formation:
 
     @property
     def alive_aliens(self):
+        """List of all aliens that have not yet been destroyed.
+
+        Returns:
+            List of ClaudeAlien objects where alive is True.
+        """
         return [a for a in self.aliens if a.alive]
 
     def update(self, dt):
+        """Tick alien animations, adjust speed, and trigger horizontal/bomb-drop steps.
+
+        The formation accelerates as fewer aliens remain. Sets self.stepped to True
+        whenever the formation takes a horizontal or downward step.
+
+        Args:
+            dt: Elapsed time in seconds since the last frame.
+        """
         alive = self.alive_aliens
         if not alive:
             return
@@ -515,6 +827,7 @@ class Formation:
             self.drop_timer = 0.0
 
     def _step(self):
+        """Move all alive aliens one step horizontally, dropping them down when an edge is reached."""
         alive = self.alive_aliens
         if not alive:
             return
@@ -533,11 +846,17 @@ class Formation:
                 a.x += self.dir * self.step_px
 
     def _drop(self):
+        """Move all alive aliens downward by STEP_DOWN pixels."""
         for a in self.alive_aliens:
             a.y += self.STEP_DOWN
 
     def try_drop_bomb(self) -> "MatrixBomb | None":
-        """Return a new bomb from a random front-row alien."""
+        """Spawn a MatrixBomb from the bottom-most alien in a randomly chosen column.
+
+        Returns:
+            A new MatrixBomb positioned at the chosen alien's feet, or None if no
+            aliens remain.
+        """
         alive = self.alive_aliens
         if not alive:
             return None
@@ -550,6 +869,11 @@ class Formation:
         return MatrixBomb(int(shooter.x), int(shooter.y) + ClaudeAlien.SIZE // 2)
 
     def lowest_y(self):
+        """Return the screen Y coordinate of the lowest alien in the formation.
+
+        Returns:
+            Maximum y value among alive aliens, or 0 if none remain.
+        """
         alive = self.alive_aliens
         return max(a.y for a in alive) if alive else 0
 
@@ -560,6 +884,11 @@ STARS = [(random.randint(0, W), random.randint(0, H - 120),
 
 
 def draw_stars(surf):
+    """Draw the pre-generated star field onto the given surface.
+
+    Args:
+        surf: pygame.Surface to draw onto.
+    """
     for sx, sy, br in STARS:
         c = (min(255, STAR_C[0] * br // 3),
              min(255, STAR_C[1] * br // 3),
@@ -569,6 +898,18 @@ def draw_stars(surf):
 
 # ── HUD ────────────────────────────────────────────────────────────────────────
 def draw_hud(surf, score, lives, level, hi):
+    """Draw the heads-up display bar at the top of the screen.
+
+    Shows the current score, high score, level number, and remaining lives
+    as small Claude alien icons.
+
+    Args:
+        surf: pygame.Surface to draw onto.
+        score: Current player score.
+        lives: Number of lives remaining (rendered as alien icons).
+        level: Current level number.
+        hi: All-time high score to display.
+    """
     pygame.draw.rect(surf, (15, 15, 40), (0, 0, W, 40))
     surf.blit(font_med.render(f"SCORE {score:06d}", True, WHITE), (10, 7))
     surf.blit(font_med.render(f"HI {hi:06d}", True, YELLOW), (W // 2 - 60, 7))
@@ -581,7 +922,15 @@ def draw_hud(surf, score, lives, level, hi):
 
 # ── screens ────────────────────────────────────────────────────────────────────
 def draw_scores_table(surf, cx: int, y: int, count: int = 10, highlight: int = -1):
-    """Draw the high scores table centred on cx, starting at y. highlight is 1-based rank."""
+    """Draw a high scores table centred horizontally on the screen.
+
+    Args:
+        surf: pygame.Surface to draw onto.
+        cx: Horizontal centre of the table in screen pixels.
+        y: Vertical position of the table header in screen pixels.
+        count: Maximum number of entries to show (default 10).
+        highlight: 1-based rank to highlight in yellow; -1 means no highlight (default -1).
+    """
     hdr = font_small.render("  #   NAME    SCORE", True, CLAUDE_O)
     surf.blit(hdr, (cx - hdr.get_width() // 2, y))
     pygame.draw.line(surf, CLAUDE_D, (cx - 120, y + 22), (cx + 120, y + 22), 1)
@@ -598,7 +947,18 @@ def draw_scores_table(surf, cx: int, y: int, count: int = 10, highlight: int = -
 
 
 def enter_initials_screen(score: int, rank: int) -> str:
-    """Classic 3-letter arcade initials entry. Returns the chosen string."""
+    """Run the arcade-style 3-letter initials entry screen.
+
+    The player uses ↑/↓ to cycle letters, →/SPACE to advance, and ENTER to confirm.
+    Pressing ESC defaults the initials to 'AAA'.
+
+    Args:
+        score: The qualifying score to display on screen.
+        rank: The 1-based leaderboard position to display.
+
+    Returns:
+        3-character uppercase string of the entered initials.
+    """
     letters = ['A', 'A', 'A']
     pos     = 0
     t       = 0.0
@@ -665,6 +1025,11 @@ def enter_initials_screen(score: int, rank: int) -> str:
 
 
 def title_screen():
+    """Run the game title/menu screen until the player presses ENTER or SPACE.
+
+    Displays the game title, an animated bobbing alien, control instructions,
+    and the current top-5 high scores. Pressing ESC quits immediately.
+    """
     alien_surf = make_claude_surf(56, 0)
     t = 0.0
     while True:
@@ -712,6 +1077,16 @@ def title_screen():
 
 
 def game_over_screen(score, hi, won=False):
+    """Run the game-over (or win) screen until the player presses ENTER, SPACE, or R.
+
+    Displays the final score, a win/lose message, and the full leaderboard.
+    Pressing ESC quits. Returns on ENTER/SPACE/R to allow a new game.
+
+    Args:
+        score: The player's final score for this run.
+        hi: The current all-time high score.
+        won: True if the player cleared all 6 levels (default False).
+    """
     t = 0.0
     while True:
         dt = clock.tick(FPS) / 1000
@@ -755,6 +1130,24 @@ GRAY = (128, 128, 128)   # needed for above
 
 
 def play_level(level: int, score: int, lives: int, hi: int):
+    """Run the core gameplay loop for a single level.
+
+    Handles player movement, shooting, alien marching, bomb drops, building damage,
+    collision detection, particle effects, screen shake, and HUD rendering.
+
+    Args:
+        level: Current level number (affects alien speed and bomb frequency).
+        score: Carry-in score from previous levels.
+        lives: Carry-in life count from previous levels.
+        hi: Current all-time high score (updated in-place if beaten).
+
+    Returns:
+        Tuple of (score, lives, hi, result) where result is one of:
+            'clear'   — all aliens destroyed; advance to next level.
+            'dead'    — player lost all lives.
+            'invaded' — aliens reached the ground line.
+            'quit'    — player pressed ESC.
+    """
     player   = Player()
     player.lives = lives
     formation = Formation()
@@ -951,6 +1344,12 @@ def play_level(level: int, score: int, lives: int, hi: int):
 
 # ── entry point ────────────────────────────────────────────────────────────────
 def main():
+    """Entry point: orchestrate the full game flow in a loop.
+
+    Sequences title screen → level progression (1–6) → level-clear bonus →
+    game over screen → high score entry → repeat. A win state is triggered
+    when the player clears all 6 levels.
+    """
     while True:
         title_screen()
 
