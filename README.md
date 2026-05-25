@@ -26,13 +26,27 @@ The Claudes are coming. Row after row of orange, block-faced AIs march across th
 | `Space` | Fire |
 | `Esc` | Quit |
 
+## Sound
+
+Retro arcade audio synthesized at startup — no external sound files needed.
+
+| Event | Sound |
+|-------|-------|
+| Formation marches | 4-note cycling beat (`duh duh duh duh`), tempo increases as Claudes die |
+| Player fires | Short descending square-wave chirp |
+| Claude killed | Noise burst with fast frequency drop |
+| Player hit | Low rumbling explosion with decay |
+| Bomb hits building | Short low thud |
+| Level clear | 4-note ascending fanfare |
+
 ## Requirements
 
 - Python 3.8+
 - pygame 2.x
+- numpy
 
 ```bash
-pip install pygame
+pip install pygame numpy
 ```
 
 ## Running
@@ -41,7 +55,7 @@ pip install pygame
 python3 claude_invaders.py
 ```
 
-No external assets — everything is drawn procedurally at runtime.
+No external assets — all graphics and audio are generated procedurally at runtime.
 
 ## Scoring
 
