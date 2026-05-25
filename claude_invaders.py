@@ -5,7 +5,9 @@ import pygame
 import random
 import math
 import sys
+import numpy as np
 
+pygame.mixer.pre_init(44100, -16, 2, 512)
 pygame.init()
 
 # ── screen ─────────────────────────────────────────────────────────────────────
@@ -44,6 +46,83 @@ MATRIX_CHARS = "01アイウエオ$%#@&イ01カキ"
 font_big   = pygame.font.SysFont("monospace", 48, bold=True)
 font_med   = pygame.font.SysFont("monospace", 26, bold=True)
 font_small = pygame.font.SysFont("monospace", 16)
+
+# ── sound engine ───────────────────────────────────────────────────────────────
+class SoundEngine:
+    SR = 44100
+
+    def __init__(self):
+        self._march_sounds = [self._tone(f, 0.09, 'square', 0.22)
+                              for f in (160, 130, 110, 85)]
+        self._march_idx = 0
+        self.shoot      = self._sweep(580, 140, 0.09, 'square', 0.18)
+        self.kill       = self._kill_sound()
+        self.player_hit = self._player_hit_sound()
+        self.bldg_hit   = self._tone(110, 0.07, 'square', 0.14)
+        self.fanfare    = self._fanfare_sound()
+
+    # ── synthesis helpers ──────────────────────────────────────────────────────
+    def _t(self, duration):
+        return np.linspace(0, duration, int(self.SR * duration), endpoint=False)
+
+    def _bake(self, arr, vol=0.3):
+        arr = np.clip(arr * vol, -1.0, 1.0)
+        s16 = (arr * 32767).astype(np.int16)
+        return pygame.sndarray.make_sound(np.ascontiguousarray(np.column_stack([s16, s16])))
+
+    def _tone(self, freq, dur, wave='square', vol=0.3):
+        t = self._t(dur)
+        s = np.sign(np.sin(2 * np.pi * freq * t)) if wave == 'square' \
+            else np.sin(2 * np.pi * freq * t)
+        fade = max(1, int(len(t) * 0.2))
+        s[-fade:] *= np.linspace(1, 0, fade)
+        return self._bake(s, vol)
+
+    def _sweep(self, f0, f1, dur, wave='square', vol=0.2):
+        t = self._t(dur)
+        phase = np.cumsum(np.linspace(f0, f1, len(t)) / self.SR * 2 * np.pi)
+        s = np.sign(np.sin(phase)) if wave == 'square' else np.sin(phase)
+        fade = max(1, int(len(t) * 0.15))
+        s[-fade:] *= np.linspace(1, 0, fade)
+        return self._bake(s, vol)
+
+    def _kill_sound(self):
+        t = self._t(0.28)
+        noise = np.random.default_rng(0).uniform(-1, 1, len(t))
+        env   = np.exp(-t * 18)
+        phase = np.cumsum(np.linspace(420, 45, len(t)) / self.SR * 2 * np.pi)
+        tone  = np.sign(np.sin(phase)) * 0.5
+        return self._bake((noise * 0.5 + tone * 0.5) * env, 0.38)
+
+    def _player_hit_sound(self):
+        t = self._t(0.75)
+        noise = np.random.default_rng(1).uniform(-1, 1, len(t))
+        env   = np.exp(-t * 5.5)
+        phase = np.cumsum(np.linspace(240, 28, len(t)) / self.SR * 2 * np.pi)
+        tone  = np.sin(phase) * 0.6
+        return self._bake((noise * 0.4 + tone * 0.6) * env, 0.52)
+
+    def _fanfare_sound(self):
+        notes, dur = [262, 330, 392, 523], 0.11
+        parts = []
+        for freq in notes:
+            t = self._t(dur)
+            s = np.sign(np.sin(2 * np.pi * freq * t))
+            fade = max(1, int(len(t) * 0.2))
+            s[-fade:] *= np.linspace(1, 0, fade)
+            parts.append(s)
+        return self._bake(np.concatenate(parts), 0.22)
+
+    # ── play helpers ───────────────────────────────────────────────────────────
+    def march(self):
+        self._march_sounds[self._march_idx % 4].play()
+        self._march_idx += 1
+
+    def play(self, name: str):
+        getattr(self, name).play()
+
+
+sfx = SoundEngine()
 
 # ── sprite helpers ─────────────────────────────────────────────────────────────
 def make_claude_surf(size: int, frame: int = 0) -> pygame.Surface:
@@ -352,6 +431,7 @@ class Formation:
         self.drop_timer = 0.0
         self.drop_interval = self.DROP_INTERVAL
         self.step_px = 14      # horizontal step per move
+        self.stepped = False   # set True each time the formation moves
 
     def _build(self):
         for row in range(ROWS):
@@ -377,10 +457,12 @@ class Formation:
         for a in alive:
             a.tick_anim(dt)
 
+        self.stepped = False
         self.move_timer += dt
         if self.move_timer >= self.move_interval:
             self.move_timer = 0.0
             self._step()
+            self.stepped = True
 
         self.drop_timer += dt
         if self.drop_timer >= self.drop_interval:
@@ -576,16 +658,20 @@ def play_level(level: int, score: int, lives: int, hi: int):
                     b = player.shoot()
                     if b:
                         bullets.append(b)
+                        sfx.play('shoot')
 
         keys = pygame.key.get_pressed()
         if keys[pygame.K_SPACE]:
             b = player.shoot()
             if b:
                 bullets.append(b)
+                sfx.play('shoot')
 
         # ── update ──
         player.update(dt, keys)
         formation.update(dt)
+        if formation.stepped:
+            sfx.march()
 
         for b in bullets:
             b.update(dt)
@@ -629,6 +715,7 @@ def play_level(level: int, score: int, lives: int, hi: int):
                     for _ in range(8):
                         particles.append(Particle(a.x, a.y, YELLOW))
                     shake = min(shake + 0.3, 1.0)
+                    sfx.play('kill')
                     break
 
         # ── bullet vs building ──
@@ -650,6 +737,7 @@ def play_level(level: int, score: int, lives: int, hi: int):
                     bm.dead = True
                     for _ in range(6):
                         particles.append(Particle(bm.x, bm.y, MX_GRN))
+                    sfx.play('bldg_hit')
                     break
 
         # ── bomb vs player ──
@@ -662,6 +750,7 @@ def play_level(level: int, score: int, lives: int, hi: int):
                     player.lives -= 1
                     player.invincible = 2.5
                     shake = 1.0
+                    sfx.play('player_hit')
                     for _ in range(25):
                         particles.append(Particle(player.x, player.y, SKIN))
                     for _ in range(15):
@@ -740,6 +829,7 @@ def main():
             score, lives, hi, result = play_level(level, score, lives, hi)
 
             if result == "clear":
+                sfx.play('fanfare')
                 # brief level-complete banner
                 t = 0.0
                 while t < 2.0:
