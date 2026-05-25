@@ -5,7 +5,9 @@ import pygame
 import random
 import math
 import sys
+import json
 import numpy as np
+from pathlib import Path
 
 pygame.mixer.pre_init(44100, -16, 2, 512)
 pygame.init()
@@ -123,6 +125,50 @@ class SoundEngine:
 
 
 sfx = SoundEngine()
+
+# ── high scores ────────────────────────────────────────────────────────────────
+class HighScores:
+    MAX  = 10
+    FILE = Path(__file__).parent / "highscores.json"
+
+    def __init__(self):
+        self.scores: list[dict] = []
+        self._load()
+
+    def _load(self):
+        try:
+            data = json.loads(self.FILE.read_text())
+            self.scores = sorted(data, key=lambda x: x["score"], reverse=True)[:self.MAX]
+        except Exception:
+            self.scores = []
+
+    def _save(self):
+        self.FILE.write_text(json.dumps(self.scores, indent=2))
+
+    def is_qualifying(self, score: int) -> bool:
+        if score <= 0:
+            return False
+        if len(self.scores) < self.MAX:
+            return True
+        return score > self.scores[-1]["score"]
+
+    def rank(self, score: int) -> int:
+        for i, entry in enumerate(self.scores):
+            if score >= entry["score"]:
+                return i + 1
+        return len(self.scores) + 1
+
+    def add(self, name: str, score: int):
+        self.scores.append({"name": name.upper()[:3].ljust(3), "score": score})
+        self.scores.sort(key=lambda x: x["score"], reverse=True)
+        self.scores = self.scores[:self.MAX]
+        self._save()
+
+    def top_score(self) -> int:
+        return self.scores[0]["score"] if self.scores else 0
+
+
+hs = HighScores()
 
 # ── sprite helpers ─────────────────────────────────────────────────────────────
 def make_claude_surf(size: int, frame: int = 0) -> pygame.Surface:
@@ -534,6 +580,90 @@ def draw_hud(surf, score, lives, level, hi):
 
 
 # ── screens ────────────────────────────────────────────────────────────────────
+def draw_scores_table(surf, cx: int, y: int, count: int = 10, highlight: int = -1):
+    """Draw the high scores table centred on cx, starting at y. highlight is 1-based rank."""
+    hdr = font_small.render("  #   NAME    SCORE", True, CLAUDE_O)
+    surf.blit(hdr, (cx - hdr.get_width() // 2, y))
+    pygame.draw.line(surf, CLAUDE_D, (cx - 120, y + 22), (cx + 120, y + 22), 1)
+    y += 28
+    for i, entry in enumerate(hs.scores[:count]):
+        rank = i + 1
+        line = f" {rank:>2}.  {entry['name']}   {entry['score']:>06d}"
+        col  = YELLOW if rank == highlight else (WHITE if rank <= 3 else GRAY)
+        row  = font_small.render(line, True, col)
+        surf.blit(row, (cx - row.get_width() // 2, y + i * 22))
+    if not hs.scores:
+        empty = font_small.render("— no scores yet —", True, GRAY)
+        surf.blit(empty, (cx - empty.get_width() // 2, y))
+
+
+def enter_initials_screen(score: int, rank: int) -> str:
+    """Classic 3-letter arcade initials entry. Returns the chosen string."""
+    letters = ['A', 'A', 'A']
+    pos     = 0
+    t       = 0.0
+
+    while True:
+        dt = clock.tick(FPS) / 1000
+        t += dt
+
+        for e in pygame.event.get():
+            if e.type == pygame.QUIT:
+                pygame.quit(); sys.exit()
+            if e.type == pygame.KEYDOWN:
+                if e.key in (pygame.K_UP, pygame.K_w):
+                    letters[pos] = chr((ord(letters[pos]) - ord('A') - 1) % 26 + ord('A'))
+                elif e.key in (pygame.K_DOWN, pygame.K_s):
+                    letters[pos] = chr((ord(letters[pos]) - ord('A') + 1) % 26 + ord('A'))
+                elif e.key in (pygame.K_RIGHT, pygame.K_SPACE):
+                    if pos < 2:
+                        pos += 1
+                    else:
+                        return ''.join(letters)
+                elif e.key in (pygame.K_LEFT, pygame.K_BACKSPACE):
+                    pos = max(0, pos - 1)
+                elif e.key == pygame.K_RETURN:
+                    return ''.join(letters)
+                elif e.key == pygame.K_ESCAPE:
+                    return 'AAA'
+                elif pygame.K_a <= e.key <= pygame.K_z:
+                    letters[pos] = chr(e.key - pygame.K_a + ord('A'))
+                    if pos < 2:
+                        pos += 1
+
+        screen.fill(SKY)
+        draw_stars(screen)
+
+        t1 = font_big.render("NEW HIGH SCORE!", True, YELLOW)
+        screen.blit(t1, (W // 2 - t1.get_width() // 2, 80))
+
+        t2 = font_med.render(f"{score:06d}   RANK #{rank}", True, WHITE)
+        screen.blit(t2, (W // 2 - t2.get_width() // 2, 150))
+
+        hint = font_small.render("↑ ↓  change letter      → / SPACE  next      ENTER  confirm", True, GRAY)
+        screen.blit(hint, (W // 2 - hint.get_width() // 2, 210))
+
+        # letter slots
+        slot_w, gap = 80, 18
+        total = 3 * slot_w + 2 * gap
+        sx = W // 2 - total // 2
+        for i, ch in enumerate(letters):
+            blink  = (pos == i and int(t * 3) % 2 == 0)
+            active = (pos == i)
+            col    = YELLOW if active else WHITE
+            rect   = pygame.Rect(sx + i * (slot_w + gap), 250, slot_w, 100)
+            pygame.draw.rect(screen, (35, 35, 70) if active else (20, 20, 45), rect, border_radius=10)
+            pygame.draw.rect(screen, col, rect, width=2, border_radius=10)
+            if not blink:
+                cs = font_big.render(ch, True, col)
+                screen.blit(cs, (rect.centerx - cs.get_width() // 2,
+                                  rect.centery - cs.get_height() // 2))
+
+        draw_scores_table(screen, W // 2, 375, count=5, highlight=rank)
+
+        pygame.display.flip()
+
+
 def title_screen():
     alien_surf = make_claude_surf(56, 0)
     t = 0.0
@@ -574,7 +704,9 @@ def title_screen():
 
         blink = font_med.render("PRESS ENTER TO PLAY", True,
                                  YELLOW if int(t * 2) % 2 == 0 else (180, 160, 0))
-        screen.blit(blink, (W // 2 - blink.get_width() // 2, 500))
+        screen.blit(blink, (W // 2 - blink.get_width() // 2, 480))
+
+        draw_scores_table(screen, W // 2, 530, count=5)
 
         pygame.display.flip()
 
@@ -603,15 +735,17 @@ def game_over_screen(score, hi, won=False):
             msg = font_big.render("GAME OVER", True, RED)
             sub = font_med.render("The Claudes have achieved sentience.", True, CLAUDE_O)
 
-        screen.blit(msg, (W // 2 - msg.get_width() // 2, 200))
-        screen.blit(sub, (W // 2 - sub.get_width() // 2, 270))
+        screen.blit(msg, (W // 2 - msg.get_width() // 2, 80))
+        screen.blit(sub, (W // 2 - sub.get_width() // 2, 148))
 
-        sc = font_med.render(f"Score: {score:06d}   Best: {hi:06d}", True, WHITE)
-        screen.blit(sc, (W // 2 - sc.get_width() // 2, 330))
+        sc = font_med.render(f"Your score:  {score:06d}", True, WHITE)
+        screen.blit(sc, (W // 2 - sc.get_width() // 2, 196))
+
+        draw_scores_table(screen, W // 2, 248, count=10)
 
         blink = font_med.render("PRESS ENTER TO PLAY AGAIN", True,
-                                 WHITE if int(t * 2) % 2 == 0 else GRAY if False else (180, 180, 180))
-        screen.blit(blink, (W // 2 - blink.get_width() // 2, 430))
+                                 WHITE if int(t * 2) % 2 == 0 else (160, 160, 160))
+        screen.blit(blink, (W // 2 - blink.get_width() // 2, 640))
 
         pygame.display.flip()
 
@@ -817,20 +951,20 @@ def play_level(level: int, score: int, lives: int, hi: int):
 
 # ── entry point ────────────────────────────────────────────────────────────────
 def main():
-    hi = 0
     while True:
         title_screen()
 
         score = 0
         lives = 3
         level = 1
+        hi    = hs.top_score()
+        won   = False
 
         while True:
             score, lives, hi, result = play_level(level, score, lives, hi)
 
             if result == "clear":
                 sfx.play('fanfare')
-                # brief level-complete banner
                 t = 0.0
                 while t < 2.0:
                     dt = clock.tick(FPS) / 1000
@@ -846,14 +980,20 @@ def main():
                     screen.blit(bonus, (W // 2 - bonus.get_width() // 2, H // 2 + 40))
                     pygame.display.flip()
                 score += lives * 500
+                hi = max(hi, score)
                 level += 1
                 if level > 6:
-                    game_over_screen(score, hi, won=True)
+                    won = True
                     break
             else:
-                won = False
-                game_over_screen(score, hi, won=won)
                 break
+
+        if hs.is_qualifying(score):
+            rank     = hs.rank(score)
+            initials = enter_initials_screen(score, rank)
+            hs.add(initials, score)
+
+        game_over_screen(score, hs.top_score(), won=won)
 
 
 if __name__ == "__main__":
